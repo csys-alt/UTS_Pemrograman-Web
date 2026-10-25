@@ -2,26 +2,44 @@
 
 declare(strict_types=1);
 
-session_start();
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 
 require_once __DIR__ . '/connection.php';
 
-function e($value): string
-{
-    return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+if (!function_exists('e')) {
+    function e($value): string
+    {
+        return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    }
 }
 
-function pageUrl(int $page, string $search, string $predicate): string
-{
-    return '?' . http_build_query([
-        'page' => $page,
-        'search' => $search,
-        'filter_predikat' => $predicate,
-    ]);
+if (!function_exists('pageUrl')) {
+    function pageUrl(int $page, string $search, string $predicate, int $limit = 10, string $sort = '', string $order = ''): string
+    {
+        $params = [
+            'page' => $page,
+            'limit' => $limit,
+        ];
+        if ($search !== '') {
+            $params['search'] = $search;
+        }
+        if ($predicate !== '') {
+            $params['filter_predikat'] = $predicate;
+        }
+        if ($sort !== '') {
+            $params['sort'] = $sort;
+            $params['order'] = $order;
+        }
+        return '?' . http_build_query($params);
+    }
 }
 
 $predicateOptions = ['Sangat Memuaskan', 'Memuaskan', 'Cukup', 'Tidak Lulus'];
 $letterOptions = ['A', 'B', 'C', 'D', 'E'];
+$allowedLimits = [5, 10, 15];
+
 $errors = [];
 $actionError = null;
 $formMode = 'create';
@@ -29,6 +47,7 @@ $originalNim = '';
 $old = [
     'nim' => '',
     'nm_lengkap' => '',
+    'file_path' => '',
     'nilai_akhir' => '',
     'nilai_huruf' => '',
     'predikat' => '',
@@ -45,21 +64,49 @@ if (!isset($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
 
+// 2. Searching parameters
 $search = trim((string) ($_GET['search'] ?? ''));
 $filterPredicate = trim((string) ($_GET['filter_predikat'] ?? ''));
 if (!in_array($filterPredicate, $predicateOptions, true)) {
     $filterPredicate = '';
 }
 
-$limit = 10;
+// 4. Pagination limit parameter (5, 10, 15)
+$limit = filter_var($_GET['limit'] ?? 10, FILTER_VALIDATE_INT);
+if (!in_array($limit, $allowedLimits, true)) {
+    $limit = 10;
+}
+
 $page = filter_var($_GET['page'] ?? 1, FILTER_VALIDATE_INT, [
     'options' => ['default' => 1, 'min_range' => 1],
 ]);
 
+// 3. Sorting by nilai_akhir
+$sort = trim((string) ($_GET['sort'] ?? ''));
+$order = strtolower(trim((string) ($_GET['order'] ?? '')));
+if ($sort !== 'nilai_akhir') {
+    $sort = '';
+}
+if (!in_array($order, ['asc', 'desc'], true)) {
+    $order = 'asc';
+}
+$nextOrder = ($sort === 'nilai_akhir' && $order === 'asc') ? 'desc' : 'asc';
+
 try {
     $pdo = databaseConnection();
 
-    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // Ensure file_path column exists in nilai table
+    try {
+        $checkCol = $pdo->query("SHOW COLUMNS FROM nilai LIKE 'file_path'")->fetchAll();
+        if (empty($checkCol)) {
+            $pdo->exec("ALTER TABLE nilai ADD COLUMN file_path VARCHAR(255) NULL AFTER nm_lengkap");
+        }
+        $pdo->exec("CREATE OR REPLACE VIEW nilaimhsw AS SELECT * FROM nilai");
+    } catch (Throwable $e) {
+        // Table or view check fallback
+    }
+
+    if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
         $action = (string) ($_POST['action'] ?? 'create');
         $submittedToken = (string) ($_POST['csrf_token'] ?? '');
         $validToken = hash_equals((string) $_SESSION['csrf_token'], $submittedToken);
@@ -85,6 +132,34 @@ try {
             foreach ($old as $field => $default) {
                 $old[$field] = trim((string) ($_POST[$field] ?? $default));
             }
+
+            // Handle optional photo upload
+            $filePath = trim((string) ($_POST['existing_file_path'] ?? ''));
+            if (isset($_FILES['foto']) && $_FILES['foto']['error'] === UPLOAD_ERR_OK) {
+                $uploadedFile = $_FILES['foto'];
+                $allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+                $fileInfo = @getimagesize($uploadedFile['tmp_name']);
+                $extension = strtolower(pathinfo($uploadedFile['name'], PATHINFO_EXTENSION));
+
+                if ($fileInfo === false || !in_array($fileInfo['mime'], $allowedTypes, true)) {
+                    $errors['foto'] = 'File yang diunggah harus berupa gambar (JPG, PNG, GIF, WEBP).';
+                } elseif ($uploadedFile['size'] > 2000000) {
+                    $errors['foto'] = 'Ukuran file foto maksimal 2 MB.';
+                } else {
+                    $targetDir = __DIR__ . '/img';
+                    if (!is_dir($targetDir)) {
+                        mkdir($targetDir, 0755, true);
+                    }
+                    $fileName = 'foto_' . time() . '_' . bin2hex(random_bytes(4)) . '.' . $extension;
+                    $targetFile = $targetDir . '/' . $fileName;
+                    if (move_uploaded_file($uploadedFile['tmp_name'], $targetFile)) {
+                        $filePath = 'img/' . $fileName;
+                    } else {
+                        $errors['foto'] = 'Gagal menyimpan file foto.';
+                    }
+                }
+            }
+            $old['file_path'] = $filePath;
 
             if (!in_array($action, ['create', 'update'], true)) {
                 $errors['form'] = 'Aksi formulir tidak dikenali.';
@@ -123,6 +198,7 @@ try {
                     $parameters = [
                         'nim' => $old['nim'],
                         'nm_lengkap' => $old['nm_lengkap'],
+                        'file_path' => $old['file_path'] !== '' ? $old['file_path'] : null,
                         'nilai_akhir' => number_format((float) $numericGrade, 2, '.', ''),
                         'nilai_huruf' => $old['nilai_huruf'] !== '' ? $old['nilai_huruf'] : null,
                         'predikat' => $old['predikat'] !== '' ? $old['predikat'] : null,
@@ -130,15 +206,15 @@ try {
 
                     if ($formMode === 'edit') {
                         $statement = $pdo->prepare(
-                            'UPDATE nilai SET nim = :nim, nm_lengkap = :nm_lengkap, '
+                            'UPDATE nilai SET nim = :nim, nm_lengkap = :nm_lengkap, file_path = :file_path, '
                                 . 'nilai_akhir = :nilai_akhir, nilai_huruf = :nilai_huruf, predikat = :predikat '
                                 . 'WHERE nim = :original_nim'
                         );
                         $parameters['original_nim'] = $originalNim;
                     } else {
                         $statement = $pdo->prepare(
-                            'INSERT INTO nilai (nim, nm_lengkap, nilai_akhir, nilai_huruf, predikat) '
-                                . 'VALUES (:nim, :nm_lengkap, :nilai_akhir, :nilai_huruf, :predikat)'
+                            'INSERT INTO nilai (nim, nm_lengkap, file_path, nilai_akhir, nilai_huruf, predikat) '
+                                . 'VALUES (:nim, :nm_lengkap, :file_path, :nilai_akhir, :nilai_huruf, :predikat)'
                         );
                     }
 
@@ -165,12 +241,14 @@ try {
     $where = [];
     $queryParameters = [];
 
+    // Search by name (and NIM)
     if ($search !== '') {
-        $where[] = '(nim LIKE :search_nim OR nm_lengkap LIKE :search_name)';
-        $queryParameters['search_nim'] = '%' . $search . '%';
+        $where[] = '(nm_lengkap LIKE :search_name OR nim LIKE :search_nim)';
         $queryParameters['search_name'] = '%' . $search . '%';
+        $queryParameters['search_nim'] = '%' . $search . '%';
     }
 
+    // Search by predicate
     if ($filterPredicate !== '') {
         $where[] = 'predikat = :predicate';
         $queryParameters['predicate'] = $filterPredicate;
@@ -184,11 +262,20 @@ try {
     $page = min((int) $page, $totalPages);
     $offset = ($page - 1) * $limit;
 
+    // 3. Sorting by nilai_akhir
+    if ($sort === 'nilai_akhir') {
+        $direction = $order === 'desc' ? 'DESC' : 'ASC';
+        $orderSql = " ORDER BY nilai_akhir {$direction}, nim ASC";
+    } else {
+        $orderSql = " ORDER BY created_date DESC, nim DESC";
+    }
+
     $dataStatement = $pdo->prepare(
-        'SELECT nim, nm_lengkap, nilai_akhir, nilai_huruf, predikat, created_date, modified_date '
+        'SELECT nim, nm_lengkap, file_path, nilai_akhir, nilai_huruf, predikat, created_date, modified_date '
             . 'FROM nilai'
             . $whereSql
-            . ' ORDER BY created_date DESC, nim DESC LIMIT :limit OFFSET :offset'
+            . $orderSql
+            . ' LIMIT :limit OFFSET :offset'
     );
 
     foreach ($queryParameters as $parameter => $value) {
@@ -247,7 +334,7 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
     <meta
         name="description"
         content="Dashboard rekap nilai mahasiswa yang terhubung ke MySQL XAMPP." />
-    <link rel="preload" href="../dist/css/adminlte.css" as="style" />
+    <link rel="preload" href="dist/css/adminlte.css" as="style" />
     <link
         rel="stylesheet"
         href="https://cdn.jsdelivr.net/npm/@fontsource/source-sans-3@5.0.12/index.css"
@@ -261,7 +348,7 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
         rel="stylesheet"
         href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.min.css"
         crossorigin="anonymous" />
-    <link rel="stylesheet" href="../dist/css/adminlte.css" />
+    <link rel="stylesheet" href="dist/css/adminlte.css" />
     <link rel="stylesheet" href="assets/app.css" />
 </head>
 
@@ -270,100 +357,6 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
     data-show-grade-modal="<?= $showModal ? 'true' : 'false' ?>"
     data-grade-form-mode="<?= e($formMode) ?>">
     <div class="app-wrapper">
-        <!-- <nav class="app-header navbar navbar-expand bg-body" aria-label="Navigasi atas">
-            <div class="container-fluid">
-                <ul class="navbar-nav">
-                    <li class="nav-item">
-                        <button
-                            class="nav-link"
-                            type="button"
-                            data-lte-toggle="sidebar"
-                            aria-label="Buka atau tutup menu">
-                            <i class="bi bi-list" aria-hidden="true"></i>
-                        </button>
-                    </li>
-                    <li class="nav-item d-none d-md-block">
-                        <span class="nav-link text-body-secondary">Database: dbnilai</span>
-                    </li>
-                </ul>
-                <ul class="navbar-nav ms-auto">
-                    <li class="nav-item dropdown">
-                        <button
-                            class="nav-link"
-                            type="button"
-                            id="bd-theme"
-                            data-bs-toggle="dropdown"
-                            aria-expanded="false"
-                            aria-label="Pilih tampilan warna">
-                            <i class="bi bi-sun-fill" data-lte-theme-icon="light" aria-hidden="true"></i>
-                            <i class="bi bi-moon-fill d-none" data-lte-theme-icon="dark" aria-hidden="true"></i>
-                            <i class="bi bi-circle-half d-none" data-lte-theme-icon="auto" aria-hidden="true"></i>
-                        </button>
-                        <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="bd-theme">
-                            <li>
-                                <button class="dropdown-item d-flex align-items-center" type="button" data-bs-theme-value="light">
-                                    <i class="bi bi-sun-fill me-2" aria-hidden="true"></i>
-                                    Terang
-                                    <i class="bi bi-check-lg ms-auto d-none" aria-hidden="true"></i>
-                                </button>
-                            </li>
-                            <li>
-                                <button class="dropdown-item d-flex align-items-center" type="button" data-bs-theme-value="dark">
-                                    <i class="bi bi-moon-fill me-2" aria-hidden="true"></i>
-                                    Gelap
-                                    <i class="bi bi-check-lg ms-auto d-none" aria-hidden="true"></i>
-                                </button>
-                            </li>
-                            <li>
-                                <button class="dropdown-item d-flex align-items-center" type="button" data-bs-theme-value="auto">
-                                    <i class="bi bi-circle-half me-2" aria-hidden="true"></i>
-                                    Otomatis
-                                    <i class="bi bi-check-lg ms-auto d-none" aria-hidden="true"></i>
-                                </button>
-                            </li>
-                        </ul>
-                    </li>
-                </ul>
-            </div>
-        </nav> -->
-
-        <!-- <aside class="app-sidebar bg-body-secondary shadow" data-bs-theme="dark">
-            <div class="sidebar-brand">
-                <a href="readnilai.php" class="brand-link">
-                    <img
-                        src="../dist/assets/img/AdminLTELogo.png"
-                        alt=""
-                        width="32"
-                        height="32"
-                        class="brand-image opacity-75 shadow" />
-                    <span class="brand-text fw-light">Sistem Nilai</span>
-                </a>
-            </div>
-            <div class="sidebar-wrapper">
-                <nav class="mt-2" aria-label="Menu utama">
-                    <ul class="nav sidebar-menu flex-column" data-lte-toggle="treeview" role="menu">
-                        <li class="nav-header">AKADEMIK</li>
-                        <li class="nav-item">
-                            <a href="readnilai.php" class="nav-link active" aria-current="page">
-                                <i class="nav-icon bi bi-table" aria-hidden="true"></i>
-                                <p>Data Nilai</p>
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <button
-                                type="button"
-                                class="nav-link w-100 border-0"
-                                data-bs-toggle="modal"
-                                data-bs-target="#grade-modal">
-                                <i class="nav-icon bi bi-plus-square" aria-hidden="true"></i>
-                                <p>Tambah Nilai</p>
-                            </button>
-                        </li>
-                    </ul>
-                </nav>
-            </div>
-        </aside> -->
-
         <main class="app-main" id="main-content">
             <div class="app-content-header">
                 <div class="container-fluid">
@@ -423,46 +416,6 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
                         </div>
                     <?php endif; ?>
 
-                    <!-- <div class="row g-3 mb-3" aria-label="Ringkasan nilai">
-              <div class="col-12 col-md-4">
-                <div class="info-box mb-0">
-                  <span class="info-box-icon text-bg-primary shadow-sm">
-                    <i class="bi bi-people-fill" aria-hidden="true"></i>
-                  </span>
-                  <div class="info-box-content">
-                    <span class="info-box-text">Total Mahasiswa</span>
-                    <span class="info-box-number"><?= e((string) $stats['total']) ?></span>
-                  </div>
-                </div>
-              </div>
-              <div class="col-12 col-md-4">
-                <div class="info-box mb-0">
-                  <span class="info-box-icon text-bg-success shadow-sm">
-                    <i class="bi bi-bar-chart-fill" aria-hidden="true"></i>
-                  </span>
-                  <div class="info-box-content">
-                    <span class="info-box-text">Rata-rata Nilai</span>
-                    <span class="info-box-number">
-                      <?= $stats['average'] !== null ? e(number_format((float) $stats['average'], 2, ',', '.')) : '0,00' ?>
-                    </span>
-                  </div>
-                </div>
-              </div>
-              <div class="col-12 col-md-4">
-                <div class="info-box mb-0">
-                  <span class="info-box-icon text-bg-warning shadow-sm">
-                    <i class="bi bi-trophy-fill" aria-hidden="true"></i>
-                  </span>
-                  <div class="info-box-content">
-                    <span class="info-box-text">Nilai Tertinggi</span>
-                    <span class="info-box-number">
-                      <?= $stats['highest'] !== null ? e(number_format((float) $stats['highest'], 2, ',', '.')) : '0,00' ?>
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div> -->
-
                     <section class="card" aria-labelledby="grade-directory-title">
                         <div class="card-header">
                             <h2 class="card-title" id="grade-directory-title">Direktori Nilai</h2>
@@ -470,10 +423,19 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
                                 <?= e((string) $totalData) ?> hasil
                             </div>
                         </div>
+
+                        <!-- 2. Fitur Pencarian Data (Searching) -->
                         <div class="card-body border-bottom">
                             <form method="get" action="readnilai.php" class="grade-toolbar" role="search">
+                                <input type="hidden" name="limit" value="<?= e((string) $limit) ?>" />
+                                <?php if ($sort !== ''): ?>
+                                    <input type="hidden" name="sort" value="<?= e($sort) ?>" />
+                                    <input type="hidden" name="order" value="<?= e($order) ?>" />
+                                <?php endif; ?>
+
+                                <!-- 2.1 Pencarian berdasarkan Nama (search by name) -->
                                 <div class="grade-toolbar__search">
-                                    <label for="search" class="form-label">Cari mahasiswa</label>
+                                    <label for="search" class="form-label">Cari Nama Mahasiswa</label>
                                     <div class="input-group">
                                         <span class="input-group-text">
                                             <i class="bi bi-search" aria-hidden="true"></i>
@@ -483,10 +445,12 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
                                             id="search"
                                             name="search"
                                             class="form-control"
-                                            placeholder="Nama atau NIM"
+                                            placeholder="Cari berdasarkan nama..."
                                             value="<?= e($search) ?>" />
                                     </div>
                                 </div>
+
+                                <!-- 2.2 Pencarian berdasarkan Predikat (search by predicate) -->
                                 <div class="grade-toolbar__filter">
                                     <label for="filter_predikat" class="form-label">Predikat</label>
                                     <select id="filter_predikat" name="filter_predikat" class="form-select">
@@ -498,13 +462,14 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
+
                                 <div class="grade-toolbar__actions d-flex gap-2">
                                     <button type="submit" class="btn btn-outline-secondary">
                                         <i class="bi bi-funnel me-1" aria-hidden="true"></i>
                                         Terapkan
                                     </button>
-                                    <?php if ($search !== '' || $filterPredicate !== ''): ?>
-                                        <a href="readnilai.php" class="btn btn-outline-secondary">Reset</a>
+                                    <?php if ($search !== '' || $filterPredicate !== '' || $sort !== ''): ?>
+                                        <a href="readnilai.php<?= $limit !== 10 ? '?limit=' . $limit : '' ?>" class="btn btn-outline-secondary">Reset</a>
                                     <?php endif; ?>
                                     <button
                                         type="button"
@@ -548,8 +513,24 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
                                     <thead>
                                         <tr>
                                             <th scope="col" class="ps-3">NIM</th>
-                                            <th scope="col">Nama Lengkap</th>
-                                            <th scope="col">Nilai Akhir</th>
+                                            <th scope="col">Nama Mahasiswa</th>
+                                            <!-- 3. Pengurutan Data (Sorting) berdasarkan data Nilai Akhir -->
+                                            <th scope="col">
+                                                <a href="<?= e(pageUrl(1, $search, $filterPredicate, $limit, 'nilai_akhir', $nextOrder)) ?>" 
+                                                   class="text-decoration-none text-body d-inline-flex align-items-center" 
+                                                   title="Urutkan berdasarkan Nilai Akhir (<?= $nextOrder === 'asc' ? 'Naik' : 'Turun' ?>)">
+                                                    <span>Nilai Akhir</span>
+                                                    <?php if ($sort === 'nilai_akhir'): ?>
+                                                        <?php if ($order === 'asc'): ?>
+                                                            <i class="bi bi-arrow-up text-primary ms-1" aria-label="(Urutan Naik)"></i>
+                                                        <?php else: ?>
+                                                            <i class="bi bi-arrow-down text-primary ms-1" aria-label="(Urutan Turun)"></i>
+                                                        <?php endif; ?>
+                                                    <?php else: ?>
+                                                        <i class="bi bi-arrow-down-up text-body-secondary ms-1 small" aria-hidden="true"></i>
+                                                    <?php endif; ?>
+                                                </a>
+                                            </th>
                                             <th scope="col">Nilai Huruf</th>
                                             <th scope="col">Predikat</th>
                                             <th scope="col">Dibuat</th>
@@ -561,7 +542,24 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
                                         <?php foreach ($records as $record): ?>
                                             <tr>
                                                 <th scope="row" class="ps-3 fw-semibold"><?= e($record['nim']) ?></th>
-                                                <td><?= e($record['nm_lengkap']) ?></td>
+                                                <!-- 1. Pembacaan Data Foto di kolom Nama Mahasiswa -->
+                                                <td>
+                                                    <?php
+                                                        $fotoPath = !empty($record['file_path']) ? $record['file_path'] : 'img/default-150x150.png';
+                                                        if (!str_starts_with($fotoPath, 'http') && !file_exists(__DIR__ . '/' . $fotoPath)) {
+                                                            $fotoPath = 'img/default-150x150.png';
+                                                        }
+                                                    ?>
+                                                    <div class="d-flex align-items-center gap-2">
+                                                        <img
+                                                            src="<?= e($fotoPath) ?>"
+                                                            alt="Foto <?= e($record['nm_lengkap']) ?>"
+                                                            class="rounded-circle border shadow-sm flex-shrink-0"
+                                                            style="width: 36px; height: 36px; object-fit: cover;"
+                                                            onerror="this.src='img/default-150x150.png'" />
+                                                        <span class="fw-medium"><?= e($record['nm_lengkap']) ?></span>
+                                                    </div>
+                                                </td>
                                                 <td><?= e(number_format((float) $record['nilai_akhir'], 2, ',', '.')) ?></td>
                                                 <td>
                                                     <?php if ($record['nilai_huruf'] !== null): ?>
@@ -596,6 +594,7 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
                                                             data-grade-action="edit"
                                                             data-nim="<?= e($record['nim']) ?>"
                                                             data-nama="<?= e($record['nm_lengkap']) ?>"
+                                                            data-foto="<?= e($record['file_path'] ?? '') ?>"
                                                             data-nilai-akhir="<?= e(number_format((float) $record['nilai_akhir'], 2, '.', '')) ?>"
                                                             data-nilai-huruf="<?= e($record['nilai_huruf'] ?? '') ?>"
                                                             data-predikat="<?= e($record['predikat'] ?? '') ?>"
@@ -626,43 +625,89 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
                             </div>
                         <?php endif; ?>
 
-                        <div class="card-footer d-flex flex-column flex-md-row gap-3 justify-content-between align-items-md-center">
-                            <p class="mb-0 text-body-secondary small" aria-live="polite">
-                                Menampilkan <?= e((string) $startNumber) ?>-<?= e((string) $endNumber) ?> dari
-                                <?= e((string) $totalData) ?> data.
-                            </p>
-                            <?php if ($totalPages > 1): ?>
-                                <nav aria-label="Halaman data nilai">
-                                    <ul class="pagination pagination-sm mb-0">
-                                        <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                        <!-- 4. Fitur Pagination dan Pilihan Limit Record (5, 10, 15) -->
+                        <div class="card-footer d-flex flex-column flex-lg-row gap-3 justify-content-between align-items-lg-center">
+                            <div class="d-flex flex-wrap align-items-center gap-3">
+                                <p class="mb-0 text-body-secondary small" aria-live="polite">
+                                    Menampilkan <?= e((string) $startNumber) ?>-<?= e((string) $endNumber) ?> dari <?= e((string) $totalData) ?> data.
+                                </p>
+                                <!-- Drop-down limit 5, 10, 15 record per page -->
+                                <div class="d-flex align-items-center gap-2">
+                                    <label for="limit-select" class="text-body-secondary small mb-0">Tampilkan:</label>
+                                    <select id="limit-select" class="form-select form-select-sm" style="width: auto;" onchange="window.location.href=this.value">
+                                        <?php foreach ($allowedLimits as $optLimit): ?>
+                                            <option value="<?= e(pageUrl(1, $search, $filterPredicate, $optLimit, $sort, $order)) ?>" <?= $limit === $optLimit ? 'selected' : '' ?>>
+                                                <?= $optLimit ?> record per page
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <!-- Tombol First Page, Previous, Angka, Next, Last Page -->
+                            <nav aria-label="Halaman data nilai">
+                                <ul class="pagination pagination-sm mb-0 flex-wrap">
+                                    <!-- First Page -->
+                                    <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                                        <a
+                                            class="page-link"
+                                            href="<?= e(pageUrl(1, $search, $filterPredicate, $limit, $sort, $order)) ?>"
+                                            aria-label="First Page"
+                                            title="First Page">
+                                            <i class="bi bi-chevron-double-left" aria-hidden="true"></i>
+                                            <span class="d-none d-sm-inline ms-1">First</span>
+                                        </a>
+                                    </li>
+
+                                    <!-- Previous Page -->
+                                    <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                                        <a
+                                            class="page-link"
+                                            href="<?= e(pageUrl(max(1, $page - 1), $search, $filterPredicate, $limit, $sort, $order)) ?>"
+                                            aria-label="Previous Page"
+                                            title="Previous Page">
+                                            <i class="bi bi-chevron-left" aria-hidden="true"></i>
+                                            <span class="d-none d-sm-inline ms-1">Previous</span>
+                                        </a>
+                                    </li>
+
+                                    <!-- Numeric Pages -->
+                                    <?php for ($pageNumber = 1; $pageNumber <= $totalPages; $pageNumber++): ?>
+                                        <li class="page-item <?= $pageNumber === $page ? 'active' : '' ?>">
                                             <a
                                                 class="page-link"
-                                                href="<?= e(pageUrl(max(1, $page - 1), $search, $filterPredicate)) ?>"
-                                                aria-label="Halaman sebelumnya">
-                                                <i class="bi bi-chevron-left" aria-hidden="true"></i>
+                                                href="<?= e(pageUrl($pageNumber, $search, $filterPredicate, $limit, $sort, $order)) ?>"
+                                                <?= $pageNumber === $page ? 'aria-current="page"' : '' ?>>
+                                                <?= e((string) $pageNumber) ?>
                                             </a>
                                         </li>
-                                        <?php for ($pageNumber = 1; $pageNumber <= $totalPages; $pageNumber++): ?>
-                                            <li class="page-item <?= $pageNumber === $page ? 'active' : '' ?>">
-                                                <a
-                                                    class="page-link"
-                                                    href="<?= e(pageUrl($pageNumber, $search, $filterPredicate)) ?>"
-                                                    <?= $pageNumber === $page ? 'aria-current="page"' : '' ?>>
-                                                    <?= e((string) $pageNumber) ?>
-                                                </a>
-                                            </li>
-                                        <?php endfor; ?>
-                                        <li class="page-item <?= $page >= $totalPages ? 'disabled' : '' ?>">
-                                            <a
-                                                class="page-link"
-                                                href="<?= e(pageUrl(min($totalPages, $page + 1), $search, $filterPredicate)) ?>"
-                                                aria-label="Halaman berikutnya">
-                                                <i class="bi bi-chevron-right" aria-hidden="true"></i>
-                                            </a>
-                                        </li>
-                                    </ul>
-                                </nav>
-                            <?php endif; ?>
+                                    <?php endfor; ?>
+
+                                    <!-- Next Page -->
+                                    <li class="page-item <?= $page >= $totalPages ? 'disabled' : '' ?>">
+                                        <a
+                                            class="page-link"
+                                            href="<?= e(pageUrl(min($totalPages, $page + 1), $search, $filterPredicate, $limit, $sort, $order)) ?>"
+                                            aria-label="Next Page"
+                                            title="Next Page">
+                                            <span class="d-none d-sm-inline me-1">Next</span>
+                                            <i class="bi bi-chevron-right" aria-hidden="true"></i>
+                                        </a>
+                                    </li>
+
+                                    <!-- Last Page -->
+                                    <li class="page-item <?= $page >= $totalPages ? 'disabled' : '' ?>">
+                                        <a
+                                            class="page-link"
+                                            href="<?= e(pageUrl($totalPages, $search, $filterPredicate, $limit, $sort, $order)) ?>"
+                                            aria-label="Last Page"
+                                            title="Last Page">
+                                            <span class="d-none d-sm-inline me-1">Last</span>
+                                            <i class="bi bi-chevron-double-right" aria-hidden="true"></i>
+                                        </a>
+                                    </li>
+                                </ul>
+                            </nav>
                         </div>
                     </section>
                 </div>
@@ -675,6 +720,7 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
         </footer>
     </div>
 
+    <!-- Modal Form Tambah / Edit -->
     <div
         class="modal fade"
         id="grade-modal"
@@ -683,7 +729,7 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
         aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content">
-                <form method="post" action="readnilai.php" id="grade-form" novalidate>
+                <form method="post" action="readnilai.php" id="grade-form" enctype="multipart/form-data" novalidate>
                     <div class="modal-header">
                         <h2 class="modal-title fs-5" id="grade-modal-title">
                             <?= $formMode === 'edit' ? 'Edit Data Nilai' : 'Tambahkan Data Nilai' ?>
@@ -702,6 +748,11 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
                             name="original_nim"
                             id="grade-original-nim"
                             value="<?= e($originalNim) ?>" />
+                        <input
+                            type="hidden"
+                            name="existing_file_path"
+                            id="grade-existing-foto"
+                            value="<?= e($old['file_path']) ?>" />
 
                         <?php if (isset($errors['form'])): ?>
                             <div class="alert alert-danger" role="alert"><?= e($errors['form']) ?></div>
@@ -745,6 +796,21 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
                                 <?= isset($errors['nm_lengkap']) ? 'aria-invalid="true" aria-describedby="name-error"' : '' ?> />
                             <?php if (isset($errors['nm_lengkap'])): ?>
                                 <div class="invalid-feedback" id="name-error"><?= e($errors['nm_lengkap']) ?></div>
+                            <?php endif; ?>
+                        </div>
+
+                        <!-- 1. Input Foto Mahasiswa -->
+                        <div class="mb-3">
+                            <label for="foto" class="form-label">Foto Mahasiswa <span class="text-body-secondary small">(Opsional)</span></label>
+                            <input
+                                type="file"
+                                id="foto"
+                                name="foto"
+                                class="form-control <?= isset($errors['foto']) ? 'is-invalid' : '' ?>"
+                                accept="image/jpeg,image/png,image/gif,image/webp" />
+                            <div class="form-text">Format: JPG, PNG, GIF, atau WEBP. Maksimal 2 MB.</div>
+                            <?php if (isset($errors['foto'])): ?>
+                                <div class="invalid-feedback"><?= e($errors['foto']) ?></div>
                             <?php endif; ?>
                         </div>
 
@@ -822,6 +888,7 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
         </div>
     </div>
 
+    <!-- Modal Hapus Data -->
     <div
         class="modal fade"
         id="delete-grade-modal"
@@ -868,7 +935,7 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
     <script
         src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.min.js"
         crossorigin="anonymous"></script>
-    <script src="../dist/js/adminlte.js"></script>
+    <script src="dist/js/adminlte.js"></script>
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             const sidebarWrapper = document.querySelector('.sidebar-wrapper');
@@ -893,6 +960,8 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
             const modalTitle = document.getElementById('grade-modal-title');
             const formAction = document.getElementById('grade-form-action');
             const originalNim = document.getElementById('grade-original-nim');
+            const existingFoto = document.getElementById('grade-existing-foto');
+            const fotoInput = document.getElementById('foto');
             const nimField = document.getElementById('nim');
             const nameField = document.getElementById('nm_lengkap');
             const gradeField = document.getElementById('nilai_akhir');
@@ -914,6 +983,8 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
                     clearValidationState();
                     formAction.value = 'create';
                     originalNim.value = '';
+                    if (existingFoto) existingFoto.value = '';
+                    if (fotoInput) fotoInput.value = '';
                     modalTitle.textContent = 'Tambahkan Data Nilai';
                     saveButtonLabel.textContent = 'Simpan Nilai';
                 });
@@ -930,6 +1001,8 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
                     gradeField.value = button.dataset.nilaiAkhir ?? '';
                     letterField.value = button.dataset.nilaiHuruf ?? '';
                     predicateField.value = button.dataset.predikat ?? '';
+                    if (existingFoto) existingFoto.value = button.dataset.foto ?? '';
+                    if (fotoInput) fotoInput.value = '';
                     modalTitle.textContent = 'Edit Data Nilai';
                     saveButtonLabel.textContent = 'Simpan Perubahan';
                 });
