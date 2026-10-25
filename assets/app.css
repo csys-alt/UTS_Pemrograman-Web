@@ -1,0 +1,134 @@
+:root {
+  --app-table-min-width: 66rem;
+  --app-control-min-height: 2.75rem;
+}
+
+.app-sidebar .brand-link {
+  min-height: 3.5rem;
+}
+
+.app-sidebar .brand-image {
+  width: 2rem;
+  height: 2rem;
+  object-fit: contain;
+}
+
+.nav-icon,
+.btn .bi,
+.input-group-text .bi {
+  line-height: 1;
+}
+
+.grade-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2, 0.5rem);
+  align-items: end;
+}
+
+.grade-toolbar__search {
+  flex: 1 1 18rem;
+}
+
+.grade-toolbar__filter {
+  flex: 0 1 14rem;
+}
+
+.grade-table {
+  min-width: var(--app-table-min-width);
+}
+
+.grade-table th,
+.grade-table td {
+  vertical-align: middle;
+}
+
+.grade-table time {
+  white-space: nowrap;
+}
+
+.grade-actions {
+  display: inline-flex;
+  gap: var(--space-1, 0.25rem);
+  white-space: nowrap;
+}
+
+.grade-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--app-control-min-height);
+  min-height: var(--app-control-min-height);
+}
+
+.empty-state {
+  max-width: 34rem;
+  margin-inline: auto;
+  padding-block: 3rem;
+  text-align: center;
+}
+
+.empty-state .bi {
+  display: block;
+  margin-block-end: 1rem;
+  font-size: 2.5rem;
+}
+
+.modal-body-scroll {
+  max-height: min(70dvh, 42rem);
+  overflow-y: auto;
+}
+
+.pagination .page-link {
+  min-width: var(--app-control-min-height);
+  min-height: var(--app-control-min-height);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (max-width: 767.98px) {
+  .app-content-header .breadcrumb {
+    margin-block-start: 0.75rem;
+  }
+
+  .grade-toolbar__search,
+  .grade-toolbar__filter,
+  .grade-toolbar__actions {
+    flex: 1 1 100%;
+  }
+
+  .grade-toolbar__actions .btn {
+    width: 100%;
+    min-height: var(--app-control-min-height);
+  }
+
+  .modal-dialog {
+    margin: 0.75rem;
+  }
+
+  .modal-footer {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .modal-footer .btn {
+    min-height: var(--app-control-min-height);
+  }
+
+  .form-control,
+  .form-select {
+    font-size: 1rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
