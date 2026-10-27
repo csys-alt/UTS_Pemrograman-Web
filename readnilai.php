@@ -334,7 +334,7 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
     <meta
         name="description"
         content="Dashboard rekap nilai mahasiswa yang terhubung ke MySQL XAMPP." />
-    <link rel="preload" href="dist/css/adminlte.css" as="style" />
+    <link rel="preload" href="assets/adminlte.css" as="style" />
     <link
         rel="stylesheet"
         href="https://cdn.jsdelivr.net/npm/@fontsource/source-sans-3@5.0.12/index.css"
@@ -348,7 +348,7 @@ $deleted = isset($_GET['deleted']) && $_GET['deleted'] === '1';
         rel="stylesheet"
         href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.min.css"
         crossorigin="anonymous" />
-    <link rel="stylesheet" href="dist/css/adminlte.css" />
+    <link rel="stylesheet" href="assets/adminlte.css" />
     <link rel="stylesheet" href="assets/app.css" />
 </head>
 
